@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="BLE蓝牙调试工具" />
+    <meta name="theme-color" content="#fafafa" />
+    <link rel="apple-touch-icon" href="logo192.png" />
+    <link rel="manifest" href="manifest.json" />
+    <link rel="stylesheet" href="light.min.css"> <!-- https://watercss.kognise.dev/ -->
+    <title>BLE蓝牙调试工具</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            width: 100%;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100%;
+        }
+        .input-group {
+            display: flex;
+            margin-bottom: 10px;
+            width: 100%;
+        }
+        .input-group input {
+            flex: 1;
+            padding: 10px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        .input-group button {
+            padding: 10px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        .textarea-group {
+            display: flex;
+            margin-bottom: 10px;
+            width: 100%;
+        }
+        .textarea-group textarea {
+            flex: 1;
+            padding: 10px;
+            font-size: 16px;
+            height: 100px;
+            box-sizing: border-box;
+        }
+        .textarea-group button {
+            padding: 10px;
+            font-size: 16px;
+            margin-left: 10px;
+            box-sizing: border-box;
+        }
+        #recvinfo {
+            width: 100%;
+            height: 150px;
+            padding: 10px;
+            font-size: 16px;
+            margin-top: 10px;
+            box-sizing: border-box;
+        }
+        @media (max-width: 600px) {
+            .input-group, .textarea-group {
+                flex-direction: column;
+            }
+            .textarea-group button {
+                margin-left: 0;
+                margin-top: 10px;
+            }
+        }
+        .misc {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            margin: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="input-group">
+            <input type="text" id="device-name" placeholder="设备名称" readonly>
+            <button id="main-button" onclick="handleButtonClick()">连接</button>
+        </div>
+        <div class="textarea-group">
+            <textarea id="send-text" placeholder="输入要发送的内容">68 17 00 43 45 AA AA AA AA AA AA 00 5B 4F 05 01 05 40 01 02 00 00 6A 17 16</textarea>
+            <button id="send-button" onclick="senddata()" disabled>发送</button>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+            <label for="loginfo">日志信息</label>
+            <button onclick="clearLog()">清除</button>
+        </div>
+        <textarea id="loginfo" readonly style="flex-grow: 1; width: 100%;"></textarea>
+        <div class="misc">
+            <button id="install-button" hidden>将蓝牙调试工具安装到系统</button>
+            <p style="font-size: smaller; color: gray; margin: 0%">
+                <span style="font-size: smaller">蓝牙检查：edge://bluetooth-internals/#adapter</span>
+              <br />
+              <span style="font-size: smaller">copyright (c) 2024 bona, licensed under MIT License</span>
+            </p>
+        </div>
+    </div>    
+    <dialog id="dialog">
+        <header>出现错误</header>
+        <form method="dialog">
+            <p id="dialog-content"></p>
+            <menu style="display: flex; justify-content: flex-end;">
+                <button onclick="succeeded = false">好</button>
+            </menu>
+        </form>
+    </dialog>
+</body>
+
+<script>
+    function clearLog() {
+        document.getElementById('loginfo').value = '';
+    }
+    function makePayload() {
+        const text = document.getElementById('send-text').value;
+        const cleanedText = text.replace(/\s+/g, '');
+        const uint8Array = new Uint8Array(cleanedText.length / 2);
+        for (let i = 0; i < cleanedText.length; i += 2) {
+            uint8Array[i / 2] = parseInt(cleanedText.substr(i, 2), 16);
+        }
+        return uint8Array;
+    }
+
+    function log(message) {
+        const logInfo = document.getElementById("loginfo");
+        const currentTime = new Date().toLocaleString();
+        logInfo.value = `[${currentTime}] ${message}\n` + logInfo.value;
+    }
+
+    let bluetoothDevice;
+    let Characteristic;
+    let isStarted = false;
+
+    function updateUi(stage) {
+        const mainButton = document.getElementById("main-button");
+        const sendButton = document.getElementById("send-button");
+        const deviceName = document.getElementById("device-name");
+        const status = document.getElementById("status");
+        const recvinfo = document.getElementById("recvinfo");
+        switch (stage) {
+            case "pending":
+                mainButton.innerText = "请稍后";
+                mainButton.disabled = true;
+                sendButton.disabled = true;
+                deviceName.value = "已连接：" + bluetoothDevice.name;
+                break;
+            case "ok":
+                mainButton.innerText = "结束";
+                mainButton.disabled = false;
+                sendButton.disabled = false;
+                break;
+            case "standby":
+                mainButton.innerText = "开启";
+                mainButton.disabled = false;
+                sendButton.disabled = false;
+                deviceName.value = "未连接";
+                break;
+        }
+    }
+
+    async function handleBluetoothError(error) {
+        console.log(error)
+        // this is so fucking ugly but i have no choice
+        // you would never know how those shitty browsers behave
+        if (error.toString().match(/User cancelled/) || error.toString() == "2") return; // "2" is a weird behavior of Bluefy browser on iOS
+        const dialogContent = document.getElementById("dialog-content");
+        if (!navigator.bluetooth || error.toString().match(/Bluetooth adapter not available/)) {
+            dialogContent.innerText = "找不到蓝牙硬件，或浏览器不支持。\n\n限于篇幅，详情请参考源代码仓库内的“疑难解答”。";
+        } else if (error.toString().match(/User denied the browser permission/)) {
+            dialogContent.innerText = "蓝牙权限遭拒。\n\n请前往手机设置，授予浏览器“位置信息”权限。\n此权限不会用于定位，详情请参考源代码仓库内的“疑难解答”。";
+        } else if (error.toString().match(/NetworkError/)) {
+            dialogContent.innerText = "连接不稳定，无法与蓝牙设备建立连接。\n请重试。";
+        } else {
+            dialogContent.innerText = error + "\n\n是什么呢\n\n（这可能是一个Bug，请截图并反馈给开发者。）";
+        }
+        document.getElementById("dialog").showModal();
+        if (bluetoothDevice) await bluetoothDevice.gatt.disconnect();
+        isStarted = false;
+        updateUi("standby");
+    }
+
+    function bufferToHexString(array) {
+    // explanation: [0x12, 0x34, 0xAB, 0xCD] => "1234ABCD"
+    return Array.from(new Uint8Array(array))
+        .map((x) => x.toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase();
+    }
+
+    async function handleRxdNotifications(event) {
+        const value = event.target.value;
+        log("RX:"+bufferToHexString(value.buffer));
+    }
+
+    async function senddata() {
+        log("TX:"+bufferToHexString(makePayload(bluetoothDevice.name)));
+        await Characteristic.writeValue(makePayload(bluetoothDevice.name));
+    }
+
+    async function start() {
+        try {
+            bluetoothDevice = await navigator.bluetooth.requestDevice({
+                // filters: [{ namePrefix: "2" }],
+                acceptAllDevices: true,//http://localhost:63342/klbc-bluetooth-water-control/manifest.json?_ijt=ji272376ot7avl396u716kucb1
+                optionalServices: [window.navigator.userAgent.match(/Bluefy/) ? "generic_access" : 0xFFE0] // actually it's better to use 0xF1F0 instead of "generic_access" but it will trigger a bug on Bluefy
+            });
+            updateUi("pending");
+            const server = await bluetoothDevice.gatt.connect();
+            // 获取蓝牙uuid相关内容
+            const service = await server.getPrimaryService(0xFFE0);
+            // console.log(`service`, service.uuid);
+            // 获取可以读写字符流的服务
+            Characteristic = await service.getCharacteristic(0xFFE1);
+            await Characteristic.startNotifications();
+            Characteristic.addEventListener("characteristicvaluechanged", handleRxdNotifications);
+            // // 写入字节(括号中的方法为把字符串转为字符流,传输给蓝牙)
+            // await Characteristic.writeValue(makePayload(bluetoothDevice.name));
+            isStarted = true;
+            updateUi("ok");
+        } catch (error) {
+            handleBluetoothError(error);
+        }
+    }
+
+    async function end() {
+        try {
+            // const endPayload = new Uint8Array([0xFE, 0xFE, 0x09, 0xB3, 0x00, 0x00])
+            // await txdCharacteristic.writeValue(endPayload)
+            await bluetoothDevice.gatt.disconnect();
+            isStarted = false;
+            updateUi("standby");
+        } catch (error) {
+            handleBluetoothError(error);
+        }
+    }
+
+    function handleButtonClick() {
+        isStarted ? end() : start();
+    }
+</script>
+
+</html>
