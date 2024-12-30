@@ -146,6 +146,7 @@
 
     let bluetoothDevice;
     let Characteristic;
+    let CharacteristicRx;
     let isStarted = false;
 
     function updateUi(stage) {
@@ -219,17 +220,37 @@
             bluetoothDevice = await navigator.bluetooth.requestDevice({
                 // filters: [{ namePrefix: "2" }],
                 acceptAllDevices: true,//http://localhost:63342/klbc-bluetooth-water-control/manifest.json?_ijt=ji272376ot7avl396u716kucb1
-                optionalServices: [window.navigator.userAgent.match(/Bluefy/) ? "generic_access" : 0xFFE0] // actually it's better to use 0xF1F0 instead of "generic_access" but it will trigger a bug on Bluefy
+                // optionalServices: [0xFF59] // actually it's better to use 0xF1F0 instead of "generic_access" but it will trigger a bug on Bluefy
+                optionalServices: ['6e400001-b5a3-f393-e0a9-e50e24dc4179', window.navigator.userAgent.match(/Bluefy/) ? "generic_access" : 0xFFE0]
             });
             updateUi("pending");
             const server = await bluetoothDevice.gatt.connect();
+            const services = await server.getPrimaryServices();
+            if(services.length == 0){
+                throw new Error('No services found');
+                return;
+            }
             // 获取蓝牙uuid相关内容
-            const service = await server.getPrimaryService(0xFFE0);
+            const service = services[0];
             // console.log(`service`, service.uuid);
             // 获取可以读写字符流的服务
-            Characteristic = await service.getCharacteristic(0xFFE1);
-            await Characteristic.startNotifications();
-            Characteristic.addEventListener("characteristicvaluechanged", handleRxdNotifications);
+            const Characteristics = await service.getCharacteristics();
+            if(Characteristics.length == 0){
+                throw new Error('No characteristics found');
+                return;
+            }
+            if(Characteristics.length == 1)
+            {
+                Characteristic = Characteristics[0];
+                CharacteristicRx = Characteristics[0];
+            }
+            else
+            {
+                Characteristic = Characteristics[0];
+                CharacteristicRx = Characteristics[1];
+            }
+            await CharacteristicRx.startNotifications();
+            CharacteristicRx.addEventListener("characteristicvaluechanged", handleRxdNotifications);
             // // 写入字节(括号中的方法为把字符串转为字符流,传输给蓝牙)
             // await Characteristic.writeValue(makePayload(bluetoothDevice.name));
             isStarted = true;
